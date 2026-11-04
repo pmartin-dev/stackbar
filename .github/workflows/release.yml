@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Xcode version
+        run: |
+          xcodebuild -version
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "27.2"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Test
+        run: |
+          xcodebuild -skipMacroValidation \
+            -project Stackbar.xcodeproj \
+            -scheme Stackbar \
+            -destination 'platform=macOS,arch=arm64' \
+            -parallel-testing-enabled NO \
+            test
+
+      - name: Archive universal app
+        run: |
+          xcodebuild -skipMacroValidation \
+            -project Stackbar.xcodeproj \
+            -scheme Stackbar \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$RUNNER_TEMP/Stackbar.xcarchive" \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="-" \
+            archive
+
+      - name: Verify and package
+        run: |
+          app_path="$RUNNER_TEMP/Stackbar.xcarchive/Products/Applications/Stackbar.app"
+          test -d "$app_path"
+          codesign --verify --deep --strict "$app_path"
+          for binary in \
+            "$app_path/Contents/MacOS/Stackbar" \
+            "$app_path/Contents/MacOS/Helpers/StackbarProcessHost"
+          do
+            architectures="$(lipo -archs "$binary")"
+            [[ "$architectures" == *arm64* && "$architectures" == *x86_64* ]]
+          done
+          mkdir -p dist
+          scripts/make-dmg.sh "$app_path" dist/Stackbar.dmg
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/Stackbar.dmg \
+            README.md \
+            THIRD_PARTY_NOTICES.md \
+            --draft \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
