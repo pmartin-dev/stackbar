@@ -26,7 +26,9 @@ struct PreferencesView: View {
           }
         } accessory: {
           Button {
-            let draft = ProjectDraft()
+            guard let url = FolderPicker.choose() else { return }
+            var draft = ProjectDraft()
+            draft.chooseDirectory(url)
             newDrafts.append(draft)
             expandedIDs.insert(draft.id)
           } label: {
@@ -150,6 +152,7 @@ private struct ProjectCard: View {
   @State private var isHovered = false
   @State private var detectedCommands: [DetectedCommand]?
   @State private var selectedCommandIDs: Set<DetectedCommand.ID> = []
+  @State private var showsAllDetected = false
   @FocusState private var isNameFocused: Bool
 
   let saved: Project?
@@ -215,7 +218,12 @@ private struct ProjectCard: View {
       return true
     } isTargeted: { isDropTargeted = $0 }
     .onAppear {
-      if saved == nil { isNameFocused = true }
+      guard saved == nil else { return }
+      if draft.directoryURL != nil, hasNoLaunchCommand {
+        detectCommands()
+      } else {
+        isNameFocused = true
+      }
     }
     .task(id: draft) {
       try? await Task.sleep(for: .milliseconds(400))
@@ -468,19 +476,18 @@ private struct ProjectCard: View {
   }
 
   private func chooseFolder() {
-    let panel = NSOpenPanel()
-    panel.canChooseFiles = false
-    panel.canChooseDirectories = true
-    panel.allowsMultipleSelection = false
-    panel.directoryURL = draft.directoryURL
-    if panel.runModal() == .OK, let url = panel.url {
+    if let url = FolderPicker.choose(startingAt: draft.directoryURL) {
       folderChosen(url)
     }
   }
 
+  private var hasNoLaunchCommand: Bool {
+    draft.services.allSatisfy { $0.launchCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+  }
+
   private func folderChosen(_ url: URL) {
     draft.chooseDirectory(url)
-    if draft.services.allSatisfy({ $0.launchCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+    if hasNoLaunchCommand {
       detectCommands()
     }
   }
@@ -489,6 +496,7 @@ private struct ProjectCard: View {
     guard let directoryURL = draft.directoryURL else { return }
     let commands = CommandDetector.detect(in: directoryURL)
     selectedCommandIDs = Set(commands.filter(\.isLikelyService).map(\.id))
+    showsAllDetected = !commands.contains(where: \.isLikelyService)
     detectedCommands = commands
   }
 
@@ -501,16 +509,29 @@ private struct ProjectCard: View {
         Text("No commands detected in this folder.")
           .foregroundStyle(.secondary)
       } else {
-        ForEach(DetectedCommand.Source.allCases.filter { source in commands.contains { $0.source == source } }, id: \.self) { source in
+        let visible = showsAllDetected ? commands : commands.filter { $0.isLikelyService || selectedCommandIDs.contains($0.id) }
+        ForEach(DetectedCommand.Source.allCases.filter { source in visible.contains { $0.source == source } }, id: \.self) { source in
           VStack(alignment: .leading, spacing: 2) {
             Text(source.displayName)
               .font(.caption)
               .foregroundStyle(.secondary)
               .padding(.horizontal, 4)
-            ForEach(commands.filter { $0.source == source }) { command in
+            ForEach(visible.filter { $0.source == source }) { command in
               detectedCommandRow(command)
             }
           }
+        }
+        if visible.count < commands.count || showsAllDetected && commands.contains(where: \.isLikelyService) {
+          Button {
+            withAnimation(.easeOut(duration: 0.15)) { showsAllDetected.toggle() }
+          } label: {
+            Label(
+              showsAllDetected ? "Show suggested only" : "Show \(commands.count - visible.count) more commands",
+              systemImage: showsAllDetected ? "chevron.up" : "chevron.down"
+            )
+            .font(.callout)
+          }
+          .buttonStyle(HoverButtonStyle(padding: 5))
         }
       }
       HStack(spacing: 6) {
@@ -568,5 +589,18 @@ private struct ProjectCard: View {
         if isOn { selectedCommandIDs.insert(id) } else { selectedCommandIDs.remove(id) }
       }
     )
+  }
+}
+
+@MainActor
+private enum FolderPicker {
+  static func choose(startingAt directory: URL? = nil) -> URL? {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.prompt = "Choose"
+    panel.directoryURL = directory
+    return panel.runModal() == .OK ? panel.url : nil
   }
 }

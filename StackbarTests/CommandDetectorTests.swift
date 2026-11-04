@@ -31,6 +31,53 @@ struct CommandDetectorTests {
   }
 
   @Test
+  func skipsSeparatorEmptyAndPlaceholderScripts() throws {
+    let directory = try makeDirectory([
+      "package.json": #"""
+      {"scripts": {
+        "------ DEV ------": "",
+        "start": "ng serve",
+        "blank": "  ",
+        "test": "echo \"Error: no test specified\" && exit 1"
+      }}
+      """#,
+    ])
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    #expect(CommandDetector.detect(in: directory).map(\.name) == ["start"])
+  }
+
+  @Test
+  func preChecksDevVariantsButNotTeardownOrBuildTasks() throws {
+    let directory = try makeDirectory([
+      "package.json": #"{"scripts": {"dev:up": "a", "dev:down": "b", "prod:up": "c", "start:mock": "d", "dev:build": "e"}}"#,
+    ])
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    #expect(CommandDetector.detect(in: directory).map(\.isLikelyService) == [true, false, false, true, false])
+  }
+
+  @Test
+  func readsTaskfileDistAndPreChecksStartDev() throws {
+    let directory = try makeDirectory([
+      "Taskfile.dist.yml": """
+      version: "3"
+      tasks:
+        install:
+          cmds: [uv sync]
+        start:dev:
+          cmds: [uvicorn app:app]
+      """,
+    ])
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let commands = CommandDetector.detect(in: directory)
+
+    #expect(commands.map(\.command) == ["task install", "task start:dev"])
+    #expect(commands.map(\.isLikelyService) == [false, true])
+  }
+
+  @Test
   func detectsMakefileTargetsIgnoringSpecialLines() throws {
     let directory = try makeDirectory([
       "Makefile": """

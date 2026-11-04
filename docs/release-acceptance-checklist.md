@@ -4,7 +4,7 @@ Run these checks against the archived app and the DMG, not only from Xcode:
 
 - [ ] Launch a project using the configured zsh shell and another using bash; verify the commands run in the selected project folder without a TTY.
 - [ ] Launch a command that starts a child process, then stop it; verify the process group exits and logs remain available.
-- [ ] In Preferences, add a project inline (type, choose or drop a folder); verify it auto-saves once name, folder and launch command are valid, and that invalid edits show an inline error without saving.
+- [ ] In Preferences, click Add Project; verify the folder picker opens immediately, then the new card is prefilled with the folder name and detected commands (cancel adds nothing); verify it auto-saves once name, folder and launch command are valid, and that invalid edits show an inline error without saving.
 - [ ] In the menu-bar popover, verify each project shows a single play or stop button matching its state, plus restart while running.
 - [ ] Remove or rename a project's folder after configuration; verify the play button is disabled and its help text explains why.
 - [ ] With an existing schema v1 `projects.json`, launch Stackbar; verify projects load as single-service projects and are rewritten as schema v2 on the next edit.

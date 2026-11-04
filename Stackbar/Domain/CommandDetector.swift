@@ -71,8 +71,15 @@ enum CommandDetector {
 
   // MARK: - Sources
 
-  private static let likelyScriptNames: Set<String> = ["dev", "start", "serve", "watch", "preview"]
-  private static let likelyTargetNames: Set<String> = ["run", "dev", "start", "serve", "up", "watch"]
+  private static let likelyNames: Set<String> = ["run", "dev", "start", "serve", "up", "watch", "preview"]
+  private static let teardownWords: Set<String> = ["down", "stop", "kill", "clean", "reset", "build", "test", "lint"]
+
+  /// `dev`, `start:mock`, `dev:up` look like long-running services; `dev:down` or `prod:up` do not.
+  static func looksLikeService(_ name: String) -> Bool {
+    let parts = name.lowercased().split(whereSeparator: { ":-_/".contains($0) }).map(String.init)
+    guard let base = parts.first, likelyNames.contains(base) else { return false }
+    return !parts.dropFirst().contains { teardownWords.contains($0) }
+  }
 
   private static func packageScripts(_ root: Root) -> [DetectedCommand] {
     guard
@@ -95,13 +102,18 @@ enum CommandDetector {
     let names = scripts.keys.sorted { lhs, rhs in
       position(of: lhs, in: text) < position(of: rhs, in: text)
     }
-    return names.map { name in
-      let base = name.split(separator: ":").first.map(String.init) ?? name
+    return names.compactMap { name in
+      guard
+        name.contains(where: { $0.isLetter || $0.isNumber }),
+        let body = (scripts[name] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !body.isEmpty,
+        !body.contains("no test specified")
+      else { return nil }
       return DetectedCommand(
         name: name,
         command: "\(runner) \(name)",
         source: .packageJSON,
-        isLikelyService: likelyScriptNames.contains(name) || (name.contains(":") && ["dev", "start"].contains(base))
+        isLikelyService: looksLikeService(name)
       )
     }
   }
@@ -118,7 +130,7 @@ enum CommandDetector {
         name: target,
         command: "make \(target)",
         source: .makefile,
-        isLikelyService: likelyTargetNames.contains(target)
+        isLikelyService: looksLikeService(target)
       )
     }
   }
@@ -148,7 +160,10 @@ enum CommandDetector {
   }
 
   private static func taskfile(_ root: Root) -> [DetectedCommand] {
-    let names = ["Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"]
+    let names = [
+      "Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml",
+      "Taskfile.dist.yml", "Taskfile.dist.yaml", "taskfile.dist.yml", "taskfile.dist.yaml",
+    ]
     guard let text = names.lazy.compactMap(root.read).first else { return [] }
     var inTasks = false
     var taskIndent: Int?
@@ -172,7 +187,7 @@ enum CommandDetector {
         name: name,
         command: "task \(name)",
         source: .taskfile,
-        isLikelyService: likelyTargetNames.contains(name)
+        isLikelyService: looksLikeService(name)
       ))
     }
     return commands
