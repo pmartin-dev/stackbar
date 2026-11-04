@@ -82,9 +82,61 @@ struct ProjectProcessManagerTests {
   }
 }
 
+extension ProjectProcessManagerTests {
+  @Test
+  func givenServiceLeftRunningByPreviousRunWhenAdoptingThenItCanBeStopped() async throws {
+    let root = try makeProcessTestDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let registry = RunningServiceRegistry(fileURL: root.appendingPathComponent("running.json"))
+    let project = Project(name: "Example", directoryURL: root, launchCommand: "sleep 60 & echo child-started; wait")
+    let launch = try #require(project.launch(for: project.id))
+    let logs = LogStore()
+    let crashed = try makeProcessManager(logStore: logs, registry: registry)
+    let processGroup = try await crashed.start(launch, localAddresses: [])
+    try await waitForOutput(logs, projectID: project.id, containing: "child-started")
+    #expect(registry.load().map(\.serviceID) == [project.id])
+
+    let relaunched = try makeProcessManager(logStore: LogStore(), registry: registry)
+    let adopted = await relaunched.adoptOrphans([launch])
+    #expect(adopted == [project.id: processGroup])
+    #expect(await relaunched.activeServiceIDs() == [project.id])
+
+    try await relaunched.stop(serviceID: project.id)
+
+    #expect(kill(-processGroup, 0) == -1)
+    #expect(registry.load().isEmpty)
+  }
+
+  @Test
+  func givenDeadOrUnknownRegistryEntriesWhenAdoptingThenTheyAreDropped() async throws {
+    let root = try makeProcessTestDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let registry = RunningServiceRegistry(fileURL: root.appendingPathComponent("running.json"))
+    let finished = Process()
+    finished.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+    try finished.run()
+    finished.waitUntilExit()
+    let project = Project(name: "Example", directoryURL: root, launchCommand: "sleep 60")
+    let launch = try #require(project.launch(for: project.id))
+    registry.save([
+      .init(serviceID: project.id, processGroup: finished.processIdentifier, startedAt: nil),
+      .init(serviceID: UUID(), processGroup: getpgrp(), startedAt: nil),
+    ])
+
+    let manager = try makeProcessManager(logStore: LogStore(), registry: registry)
+    let adopted = await manager.adoptOrphans([launch])
+
+    #expect(adopted.isEmpty)
+    #expect(registry.load().isEmpty)
+  }
+}
+
 private final class ProcessManagerTestBundle: NSObject {}
 
-private func makeProcessManager(logStore: LogStore) throws -> ProjectProcessManager {
+private func makeProcessManager(
+  logStore: LogStore,
+  registry: RunningServiceRegistry? = nil
+) throws -> ProjectProcessManager {
   let helperURL = Bundle(for: ProcessManagerTestBundle.self).bundleURL
     .appendingPathComponent("Contents", isDirectory: true)
     .appendingPathComponent("MacOS", isDirectory: true)
@@ -92,7 +144,7 @@ private func makeProcessManager(logStore: LogStore) throws -> ProjectProcessMana
   guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
     throw ProjectProcessManagerError.processHostUnavailable(helperURL.path)
   }
-  return ProjectProcessManager(logStore: logStore, helperURL: helperURL)
+  return ProjectProcessManager(logStore: logStore, helperURL: helperURL, registry: registry)
 }
 
 private func waitForOutput(

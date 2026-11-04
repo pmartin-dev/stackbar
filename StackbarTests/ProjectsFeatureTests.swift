@@ -63,7 +63,8 @@ struct ProjectsFeatureTests {
     )
     let message = ProjectValidationError.invalidDirectory(path).localizedDescription
 
-    await store.send(.launchTapped(project.id)) {
+    await store.send(.launchTapped(project.id))
+    await store.receive(\.portsChecked) {
       $0.errorMessage = message
     }
 
@@ -124,13 +125,121 @@ struct ProjectsFeatureServicesTests {
     #expect(await recorder.log == ["stop \(api.id)"])
     #expect(store.state.summary(for: project).status == .partial)
   }
+
+  @Test
+  func givenLastRunningServiceWhenStoppingItThenProjectStopCommandRuns() async {
+    let project = makeMultiServiceProject()
+    let api = project.services[0]
+    let web = project.services[1]
+    let recorder = CommandRecorder()
+    let store = makeServicesStore(project: project, recorder: recorder, running: true)
+    store.exhaustivity = .off
+    await store.send(.processEvent(.finished(serviceID: web.id, exit: .normal)))
+
+    await store.send(.stopServiceTapped(api.id))
+    await store.finish()
+
+    #expect(await recorder.log == ["stop \(api.id)", "run docker compose down in \(project.directoryPath)"])
+  }
+
+  @Test
+  func givenOrphansAdoptedThenTheyShowAsRunningWithoutLogs() async {
+    let project = makeMultiServiceProject()
+    let api = project.services[0]
+    let store = makeServicesStore(project: project, recorder: CommandRecorder())
+
+    await store.send(.orphansAdopted([api.id: 777])) {
+      $0.runtimes[api.id] = ProjectRuntime(status: .running(processIdentifier: 777), logsUnavailable: true)
+    }
+  }
+
+  @Test(arguments: [PortChoice.stopAndLaunch, .launchAnyway, .cancel])
+  func givenPortHeldByAnotherProcessWhenLaunchingThenUserChooses(choice: PortChoice) async {
+    let project = makePortProject()
+    let service = project.services[0]
+    let recorder = CommandRecorder()
+    let python = ListeningProcess(processIdentifier: 30514, processGroup: 30512, name: "python")
+    let port = PortClient(
+      listeners: { $0 == 8000 ? [python] : [] },
+      lastDetectedPort: { _ in nil },
+      rememberDetectedPort: { _, _ in },
+      freePort: { port, pids in await recorder.record("free \(port) \(pids)"); return true }
+    )
+    let store = makeServicesStore(project: project, recorder: recorder, port: port)
+    store.exhaustivity = .off
+    let conflict = ProjectsFeature.PortConflict(
+      projectID: project.id,
+      serviceIDs: [service.id],
+      port: 8000,
+      processes: [python]
+    )
+
+    await store.send(.launchServiceTapped(service.id))
+    await store.receive(\.portsChecked) {
+      $0.portConflict = conflict
+    }
+    #expect(conflict.message == "Port 8000 is used by python (PID 30514).")
+
+    switch choice {
+    case .stopAndLaunch: await store.send(.portConflictStopAndLaunchTapped)
+    case .launchAnyway: await store.send(.portConflictLaunchAnywayTapped)
+    case .cancel: await store.send(.portConflictCancelTapped)
+    }
+    await store.finish()
+    await store.skipReceivedActions(strict: false)
+
+    #expect(store.state.portConflict == nil)
+    #expect(await recorder.started == (choice == .cancel ? [] : [service.id]))
+    #expect(await recorder.log.contains("free 8000 [30514]") == (choice == .stopAndLaunch))
+  }
+
+  @Test
+  func givenPortHeldByStackbarServiceWhenLaunchingThenNoConflictIsShown() async {
+    let project = makeMultiServiceProject()
+    let api = project.services[0]
+    let web = project.services[1]
+    let recorder = CommandRecorder()
+    let port = PortClient(
+      listeners: { _ in [ListeningProcess(processIdentifier: 50, processGroup: 42, name: "node")] },
+      lastDetectedPort: { _ in 3000 },
+      rememberDetectedPort: { _, _ in },
+      freePort: { _, _ in true }
+    )
+    let store = makeServicesStore(project: project, recorder: recorder, port: port)
+    store.exhaustivity = .off
+    await store.send(.startSucceeded(web.id, 42))
+
+    await store.send(.launchServiceTapped(api.id))
+    await store.skipReceivedActions()
+
+    #expect(store.state.portConflict == nil)
+    #expect(await recorder.started == [api.id])
+  }
+
+  @Test
+  func givenFailedServicesWhenClearingErrorsThenProjectErrorsAreCleared() async {
+    let project = makeMultiServiceProject()
+    let api = project.services[0]
+    let web = project.services[1]
+    let store = makeServicesStore(project: project, recorder: CommandRecorder(), running: true)
+    store.exhaustivity = .off
+    await store.send(.processEvent(.finished(serviceID: api.id, exit: .error("boom"))))
+    await store.send(.stopFailed(web.id, "stuck", processStopped: false))
+
+    await store.send(.clearErrorsTapped(project.id)) {
+      $0.runtimes[api.id] = ProjectRuntime(status: .stopped)
+      $0.runtimes[web.id] = ProjectRuntime(status: .running(processIdentifier: 1))
+      $0.errorMessage = nil
+    }
+  }
 }
 
 @MainActor
 private func makeServicesStore(
   project: Project,
   recorder: CommandRecorder,
-  running: Bool = false
+  running: Bool = false,
+  port: PortClient = .testValue
 ) -> TestStore<ProjectsFeature.State, ProjectsFeature.Action> {
   let runtime = running ? ProjectRuntime(status: .running(processIdentifier: 1)) : ProjectRuntime()
   return TestStore(
@@ -153,7 +262,18 @@ private func makeServicesStore(
       removeLogs: { _ in }
     )
     $0.workspaceClient = WorkspaceClient(open: { _ in true })
+    $0.portClient = port
   }
+}
+
+enum PortChoice: Sendable { case stopAndLaunch, launchAnyway, cancel }
+
+private func makePortProject() -> Project {
+  Project(
+    name: "API",
+    directoryPath: FileManager.default.temporaryDirectory.path,
+    services: [Service(name: "api", launchCommand: "task start:dev", port: 8000)]
+  )
 }
 
 private func makeMultiServiceProject() -> Project {

@@ -60,6 +60,7 @@ struct AppFeature {
         let preferences = state.preferences.notificationPreferences
         let shouldNotify: Bool
         let body: String
+        var logWindow: LogWindowDestination?
         switch exit {
         case .normal:
           shouldNotify = preferences.notifyOnNormalStop
@@ -67,13 +68,14 @@ struct AppFeature {
         case let .error(message):
           shouldNotify = preferences.notifyOnError
           body = "\(displayName): \(message)"
+          logWindow = LogWindowDestination(serviceID: serviceID, title: displayName)
         }
         guard shouldNotify else {
           return .send(.projects(.processEvent(event)))
         }
         return .merge(
           .send(.projects(.processEvent(event))),
-          .run { [notificationClient] send in
+          .run { [notificationClient, logWindow] send in
             var authorization = await notificationClient.authorizationStatus()
             if authorization == .notDetermined {
               do {
@@ -85,7 +87,7 @@ struct AppFeature {
             }
             guard authorization.allowsNotifications else { return }
             do {
-              try await notificationClient.send("Stackbar", body)
+              try await notificationClient.send("Stackbar", body, logWindow)
             } catch {
               await send(.preferences(.notificationFailed(error.localizedDescription)))
             }

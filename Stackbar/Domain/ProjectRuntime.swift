@@ -27,6 +27,8 @@ struct ProjectRuntime: Equatable, Sendable {
   var detectedURL: URL?
   var hasLogs = false
   var lastError: String?
+  /// Running service adopted from a previous Stackbar run: its earlier output was lost.
+  var logsUnavailable = false
 }
 
 /// Aggregated view of a project's service runtimes.

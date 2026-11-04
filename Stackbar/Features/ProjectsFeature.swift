@@ -11,6 +11,7 @@ struct ProjectsFeature {
     var pendingDeleteID: UUID?
     var errorMessage: String?
     var lastSavedProjectID: UUID?
+    var portConflict: PortConflict?
 
     func summary(for project: Project) -> ProjectStatusSummary {
       ProjectStatusSummary(project.services.map { runtimes[$0.id] ?? ProjectRuntime() })
@@ -25,14 +26,33 @@ struct ProjectsFeature {
     }
   }
 
+  struct PortConflict: Equatable, Sendable {
+    var projectID: UUID
+    var serviceIDs: [UUID]
+    var port: Int
+    var processes: [ListeningProcess]
+    var isFreeing = false
+
+    var message: String {
+      let owners = processes.map { "\($0.name.isEmpty ? "a process" : $0.name) (PID \($0.processIdentifier))" }
+      return "Port \(port) is used by \(owners.joined(separator: ", "))."
+    }
+  }
+
   enum Action: Equatable {
     case task
     case projectsLoaded([Project])
+    case orphansAdopted([UUID: Int32])
     case loadFailed(String)
     case launchTapped(UUID)
     case stopTapped(UUID)
     case restartTapped(UUID)
     case launchServiceTapped(UUID)
+    case portsChecked(projectID: UUID, serviceIDs: [UUID], conflict: PortConflict?)
+    case portConflictStopAndLaunchTapped
+    case portConflictLaunchAnywayTapped
+    case portConflictCancelTapped
+    case portFreed(Bool)
     case stopServiceTapped(UUID)
     case restartServiceTapped(UUID)
     case startSucceeded(UUID, Int32)
@@ -48,6 +68,7 @@ struct ProjectsFeature {
     case saveProject(Project)
     case projectSaved(Project, [Project])
     case saveFailed(String)
+    case clearErrorsTapped(UUID)
     case openFolder(UUID)
     case openURL(UUID)
     case openFailed(String)
@@ -63,6 +84,7 @@ struct ProjectsFeature {
   @Dependency(\.projectRepositoryClient) private var repository
   @Dependency(\.projectProcessClient) private var processClient
   @Dependency(\.workspaceClient) private var workspace
+  @Dependency(\.portClient) private var portClient
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -83,6 +105,21 @@ struct ProjectsFeature {
             ($0.id, state.runtimes[$0.id] ?? ProjectRuntime())
           }
         )
+        let launches = projects.flatMap { project in project.services.compactMap { project.launch(for: $0.id) } }
+        return .run { [processClient] send in
+          let adopted = await processClient.adoptOrphans(launches)
+          if !adopted.isEmpty {
+            await send(.orphansAdopted(adopted))
+          }
+        }
+
+      case let .orphansAdopted(adopted):
+        for (serviceID, processGroup) in adopted where state.runtimes[serviceID] != nil {
+          state.runtimes[serviceID] = ProjectRuntime(
+            status: .running(processIdentifier: processGroup),
+            logsUnavailable: true
+          )
+        }
         return .none
 
       case let .loadFailed(message):
@@ -91,11 +128,51 @@ struct ProjectsFeature {
 
       case let .launchTapped(projectID):
         guard let project = state.projects.first(where: { $0.id == projectID }) else { return .none }
-        return launch(project.services.map(\.id), of: project, state: &state)
+        return checkPortsThenLaunch(project.services.map(\.id), of: project, state: &state)
 
       case let .launchServiceTapped(serviceID):
         guard let project = state.project(containingService: serviceID) else { return .none }
-        return launch([serviceID], of: project, state: &state)
+        return checkPortsThenLaunch([serviceID], of: project, state: &state)
+
+      case let .portsChecked(projectID, serviceIDs, conflict):
+        state.portConflict = conflict
+        guard conflict == nil, let project = state.projects.first(where: { $0.id == projectID }) else {
+          return .none
+        }
+        return launch(serviceIDs, of: project, state: &state)
+
+      case .portConflictStopAndLaunchTapped:
+        guard var conflict = state.portConflict, !conflict.isFreeing else { return .none }
+        conflict.isFreeing = true
+        state.portConflict = conflict
+        return .run { [portClient, conflict] send in
+          await send(.portFreed(await portClient.freePort(conflict.port, conflict.processes.map(\.processIdentifier))))
+        }
+
+      case let .portFreed(freed):
+        guard let conflict = state.portConflict else { return .none }
+        guard freed else {
+          state.portConflict?.isFreeing = false
+          state.errorMessage = "Port \(conflict.port) is still in use after stopping its process."
+          return .none
+        }
+        state.portConflict = nil
+        guard let project = state.projects.first(where: { $0.id == conflict.projectID }) else { return .none }
+        return launch(conflict.serviceIDs, of: project, state: &state)
+
+      case .portConflictLaunchAnywayTapped:
+        guard
+          let conflict = state.portConflict,
+          let project = state.projects.first(where: { $0.id == conflict.projectID })
+        else {
+          return .none
+        }
+        state.portConflict = nil
+        return launch(conflict.serviceIDs, of: project, state: &state)
+
+      case .portConflictCancelTapped:
+        state.portConflict = nil
+        return .none
 
       case let .stopTapped(projectID):
         guard let project = state.projects.first(where: { $0.id == projectID }) else { return .none }
@@ -106,8 +183,10 @@ struct ProjectsFeature {
 
       case let .stopServiceTapped(serviceID):
         guard state.runtimes[serviceID]?.status.isActive == true else { return .none }
+        let project = state.project(containingService: serviceID)
+        let isLastActive = project.map { state.activeServiceIDs(of: $0) == [serviceID] } ?? false
         markStopping([serviceID], state: &state)
-        return stopEffect(serviceIDs: [serviceID], thenRunStopCommandOf: nil)
+        return stopEffect(serviceIDs: [serviceID], thenRunStopCommandOf: isLastActive ? project : nil)
 
       case let .restartTapped(projectID):
         guard let project = state.projects.first(where: { $0.id == projectID }) else { return .none }
@@ -246,6 +325,19 @@ struct ProjectsFeature {
         state.errorMessage = message
         return .none
 
+      case let .clearErrorsTapped(projectID):
+        guard let project = state.projects.first(where: { $0.id == projectID }) else { return .none }
+        for service in project.services {
+          guard var runtime = state.runtimes[service.id] else { continue }
+          runtime.lastError = nil
+          if case .exited(.error) = runtime.status {
+            runtime.status = .stopped
+          }
+          state.runtimes[service.id] = runtime
+        }
+        state.errorMessage = nil
+        return .none
+
       case let .openFolder(projectID):
         guard let project = state.projects.first(where: { $0.id == projectID }) else {
           return .none
@@ -276,14 +368,19 @@ struct ProjectsFeature {
           runtime.detectedURL = nil
           runtime.hasLogs = false
           runtime.lastError = nil
+          runtime.logsUnavailable = false
           state.runtimes[serviceID] = runtime
         case let .output(serviceID, _):
           state.runtimes[serviceID]?.hasLogs = true
         case let .detectedURL(serviceID, url):
           state.runtimes[serviceID]?.detectedURL = url
+          if let port = url.port {
+            return .run { [portClient] _ in portClient.rememberDetectedPort(serviceID, port) }
+          }
         case let .finished(serviceID, exit):
           guard var runtime = state.runtimes[serviceID] else { return .none }
           runtime.status = .exited(exit)
+          runtime.logsUnavailable = false
           if case let .error(message) = exit {
             runtime.lastError = message
           } else {
@@ -300,6 +397,31 @@ struct ProjectsFeature {
       case .delegate:
         return .none
       }
+    }
+  }
+
+  /// Checks the expected port of each service (configured or last detected) before launching.
+  /// Ports held by Stackbar's own services are ignored: their launch fails with a clear message instead.
+  private func checkPortsThenLaunch(_ serviceIDs: [UUID], of project: Project, state: inout State) -> Effect<Action> {
+    state.portConflict = nil
+    let services = project.services.filter { service in
+      serviceIDs.contains(service.id) && state.runtimes[service.id]?.status.isActive != true
+    }
+    let ownGroups = Set(state.runtimes.values.compactMap { runtime -> Int32? in
+      if case let .running(processIdentifier) = runtime.status { return processIdentifier }
+      return nil
+    })
+    return .run { [portClient] send in
+      var conflict: PortConflict?
+      for service in services {
+        guard let port = service.port ?? portClient.lastDetectedPort(service.id) else { continue }
+        let processes = await portClient.listeners(port).filter { !ownGroups.contains($0.processGroup) }
+        if !processes.isEmpty {
+          conflict = PortConflict(projectID: project.id, serviceIDs: serviceIDs, port: port, processes: processes)
+          break
+        }
+      }
+      await send(.portsChecked(projectID: project.id, serviceIDs: serviceIDs, conflict: conflict))
     }
   }
 

@@ -6,19 +6,22 @@ struct ServiceDraft: Equatable, Identifiable, Sendable {
   var relativeDirectory: String
   var launchCommand: String
   var stopCommand: String
+  var port: String
 
   init(
     id: UUID = UUID(),
     name: String = "",
     relativeDirectory: String = "",
     launchCommand: String = "",
-    stopCommand: String = ""
+    stopCommand: String = "",
+    port: String = ""
   ) {
     self.id = id
     self.name = name
     self.relativeDirectory = relativeDirectory
     self.launchCommand = launchCommand
     self.stopCommand = stopCommand
+    self.port = port
   }
 
   init(service: Service) {
@@ -27,7 +30,8 @@ struct ServiceDraft: Equatable, Identifiable, Sendable {
       name: service.name,
       relativeDirectory: service.relativeDirectory,
       launchCommand: service.launchCommand,
-      stopCommand: service.stopCommand ?? ""
+      stopCommand: service.stopCommand ?? "",
+      port: service.port.map(String.init) ?? ""
     )
   }
 }
@@ -104,14 +108,23 @@ struct ProjectDraft: Equatable, Identifiable, Sendable {
 
   func validated(alongside projects: [Project], fileManager: FileManager = .default) throws -> Project {
     guard let directoryURL else { throw ProjectValidationError.noDirectorySelected }
-    let builtServices = services.map { draft in
-      let name = draft.name.trimmed
+    let builtServices = try services.map { draft in
+      let trimmedName = draft.name.trimmed
+      let name = trimmedName.isEmpty && services.count == 1 ? Service.defaultName : trimmedName
+      var port: Int?
+      if !draft.port.trimmed.isEmpty {
+        guard let value = Int(draft.port.trimmed), (1...65_535).contains(value) else {
+          throw ProjectValidationError.invalidPort(name)
+        }
+        port = value
+      }
       return Service(
         id: draft.id,
-        name: name.isEmpty && services.count == 1 ? Service.defaultName : name,
+        name: name,
         relativeDirectory: draft.relativeDirectory.trimmed,
         launchCommand: draft.launchCommand.trimmed,
-        stopCommand: draft.stopCommand.trimmed.nilIfEmpty
+        stopCommand: draft.stopCommand.trimmed.nilIfEmpty,
+        port: port
       )
     }
     let project = Project(

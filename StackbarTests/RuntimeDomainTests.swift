@@ -3,6 +3,21 @@ import Testing
 @testable import Stackbar
 
 struct RuntimeDomainTests {
+  @Test(arguments: [
+    ("ERROR:    [Errno 48] Address already in use", "The port is already in use by another process."),
+    ("Error: listen EADDRINUSE: address already in use :::3000", "Port 3000 is already in use by another process."),
+    ("Bind for 0.0.0.0:5432 failed: port is already allocated", "Port 5432 is already in use by another process."),
+    ("Port 4200 is already in use.", "Port 4200 is already in use by another process."),
+  ])
+  func explainsPortAlreadyInUse(output: String, expected: String) {
+    #expect(OutputDiagnostics.failureHint(in: "starting\n\(output)\n") == expected)
+  }
+
+  @Test
+  func ignoresOutputWithoutKnownFailure() {
+    #expect(OutputDiagnostics.failureHint(in: "Listening on http://localhost:3000\nready") == nil)
+  }
+
   @Test
   func identifiesOnlyLocalURLsAndKeepsFirstMatch() throws {
     let detectedURL = URLDetector.firstLocalURL(

@@ -261,16 +261,18 @@ private struct ProjectCard: View {
       .opacity(isHovered ? 1 : 0)
       .allowsHitTesting(isHovered)
 
-      PlayStopButton(
-        isActive: summary?.isActive ?? false,
-        isStopping: summary?.status == .stopping,
-        disabledReason: launchDisabledReason,
-        size: 30,
-        stopHelp: (saved?.hasMultipleServices ?? false) ? "Stop all services" : "Stop",
-        launchHelp: (saved?.hasMultipleServices ?? false) ? "Launch all services" : "Launch",
-        stop: { send(.stopTapped(draft.id)) },
-        launch: { send(.launchTapped(draft.id)) }
-      )
+      if !(saved?.hasMultipleServices ?? false) && draft.services.count == 1 {
+        PlayStopButton(
+          isActive: summary?.isActive ?? false,
+          isStopping: summary?.status == .stopping,
+          disabledReason: launchDisabledReason,
+          size: 30,
+          stopHelp: "Stop",
+          launchHelp: "Launch",
+          stop: { send(.stopTapped(draft.id)) },
+          launch: { send(.launchTapped(draft.id)) }
+        )
+      }
     }
     .padding(.horizontal, 8)
     .padding(.vertical, 6)
@@ -447,10 +449,18 @@ private struct ProjectCard: View {
         .lineLimit(1...4)
         .fieldChrome(monospaced: true)
     }
-    field("Stop command (optional)") {
-      TextField("Stop command", text: service.stopCommand, prompt: Text(""), axis: .vertical)
-        .lineLimit(1...3)
-        .fieldChrome(monospaced: true)
+    HStack(alignment: .top, spacing: 8) {
+      field("Stop command (optional)") {
+        TextField("Stop command", text: service.stopCommand, prompt: Text(""), axis: .vertical)
+          .lineLimit(1...3)
+          .fieldChrome(monospaced: true)
+      }
+      field("Port (optional)") {
+        TextField("Port", text: service.port, prompt: Text(""))
+          .fieldChrome(monospaced: true)
+      }
+      .frame(width: 90)
+      .help("Checked before launch. When empty, the last port detected in the logs is used.")
     }
   }
 

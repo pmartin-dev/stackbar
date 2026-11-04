@@ -53,24 +53,31 @@ enum ProjectProcessEvent: Equatable, Sendable {
 actor ProjectProcessManager {
   private struct Session {
     var launch: ServiceLaunch
-    var process: Process
+    /// Nil for a session adopted from a previous Stackbar run.
+    var process: Process?
+    var processGroup: pid_t
+    var startedAt: Double?
     var shell: LoginShell
     var localAddresses: Set<String>
     var isStopping = false
     var detectedURL: URL?
     var urlDetectionBuffer = ""
+    var diagnosticsBuffer = ""
+    var failureHint: String?
     var outputTask: Task<Void, Never>?
     var lingeringStopProcesses: [Process] = []
   }
 
   private let logStore: LogStore
   private let helperURL: URL?
+  private let registry: RunningServiceRegistry?
   private var sessions: [UUID: Session] = [:]
   private var subscribers: [UUID: AsyncStream<ProjectProcessEvent>.Continuation] = [:]
 
-  init(logStore: LogStore = LogStore(), helperURL: URL? = nil) {
+  init(logStore: LogStore = LogStore(), helperURL: URL? = nil, registry: RunningServiceRegistry? = nil) {
     self.logStore = logStore
     self.helperURL = helperURL
+    self.registry = registry
   }
 
   func events() -> AsyncStream<ProjectProcessEvent> {
@@ -126,9 +133,12 @@ actor ProjectProcessManager {
     sessions[launch.id] = Session(
       launch: launch,
       process: process,
+      processGroup: processIdentifier,
+      startedAt: RunningServiceRegistry.processStartTime(processIdentifier),
       shell: shell,
       localAddresses: addresses
     )
+    saveRegistry()
     let outputTask = Task { [weak self] in
       for await data in outputStream {
         guard let self else { return }
@@ -178,7 +188,7 @@ actor ProjectProcessManager {
 
     let stopError: String?
     do {
-      try sendTerminationSignal(to: session.process.processIdentifier)
+      try sendTerminationSignal(to: session.processGroup)
       for process in session.lingeringStopProcesses {
         try sendTerminationSignal(to: process.processIdentifier)
       }
@@ -193,7 +203,7 @@ actor ProjectProcessManager {
       if let outputTask = session.outputTask {
         await outputTask.value
       }
-      sessions[serviceID] = nil
+      endSession(serviceID)
       let exit = stopCommandFailure.map(ProjectExit.error) ?? .normal
       publish(.finished(serviceID: serviceID, exit: exit))
       if let stopCommandFailure {
@@ -256,6 +266,36 @@ actor ProjectProcessManager {
     }
   }
 
+  /// Adopts services left running by a previous Stackbar run (crash or force quit).
+  /// Returns the adopted services and their process group; stale registry entries are dropped.
+  func adoptOrphans(_ launches: [ServiceLaunch]) -> [UUID: Int32] {
+    guard let registry else { return [:] }
+    var adopted: [UUID: Int32] = [:]
+    for entry in registry.load() where sessions[entry.serviceID] == nil {
+      guard
+        let launch = launches.first(where: { $0.id == entry.serviceID }),
+        RunningServiceRegistry.isAlive(entry),
+        let shell = try? LoginShell.current()
+      else {
+        continue
+      }
+      sessions[entry.serviceID] = Session(
+        launch: launch,
+        process: nil,
+        processGroup: entry.processGroup,
+        startedAt: entry.startedAt,
+        shell: shell,
+        localAddresses: []
+      )
+      adopted[entry.serviceID] = entry.processGroup
+      Task { [weak self] in
+        await self?.monitorAdopted(serviceID: entry.serviceID, processGroup: entry.processGroup)
+      }
+    }
+    saveRegistry()
+    return adopted
+  }
+
   func activeServiceIDs() -> Set<UUID> {
     Set(sessions.keys)
   }
@@ -300,6 +340,12 @@ actor ProjectProcessManager {
   private func publishVisibleText(_ text: String, serviceID: UUID) {
     guard !text.isEmpty else { return }
     publish(.output(serviceID: serviceID, text: text))
+
+    if var session = sessions[serviceID], session.failureHint == nil {
+      session.diagnosticsBuffer = String((session.diagnosticsBuffer + text).suffix(4_096))
+      session.failureHint = OutputDiagnostics.failureHint(in: session.diagnosticsBuffer)
+      sessions[serviceID] = session
+    }
 
     guard var session = sessions[serviceID], session.detectedURL == nil else { return }
     session.urlDetectionBuffer.append(text)
@@ -358,8 +404,39 @@ actor ProjectProcessManager {
     if let outputTask = session.outputTask {
       await outputTask.value
     }
+    let failureHint = sessions[serviceID]?.failureHint
+    endSession(serviceID)
+    publish(.finished(serviceID: serviceID, exit: exitClassification(for: process, failureHint: failureHint)))
+  }
+
+  private func monitorAdopted(serviceID: UUID, processGroup: pid_t) async {
+    while processGroupExists(processGroup) {
+      do {
+        try await Task.sleep(for: .milliseconds(500))
+      } catch {
+        return
+      }
+    }
+    guard let session = sessions[serviceID], !session.isStopping, session.processGroup == processGroup else {
+      return
+    }
+    endSession(serviceID)
+    publish(.finished(serviceID: serviceID, exit: .normal))
+  }
+
+  private func endSession(_ serviceID: UUID) {
     sessions[serviceID] = nil
-    publish(.finished(serviceID: serviceID, exit: exitClassification(for: process)))
+    saveRegistry()
+  }
+
+  private func saveRegistry() {
+    registry?.save(sessions.map { serviceID, session in
+      RunningServiceRegistry.Entry(
+        serviceID: serviceID,
+        processGroup: session.processGroup,
+        startedAt: session.startedAt
+      )
+    })
   }
 
   private func runStopCommand(
@@ -395,7 +472,7 @@ actor ProjectProcessManager {
 
   private func waitForSessionGroups(_ session: Session, timeout: Duration) async throws -> Bool {
     var groups: [(process: Process?, identifier: pid_t)] = [
-      (process: session.process, identifier: session.process.processIdentifier)
+      (process: session.process, identifier: session.processGroup)
     ]
     groups.append(
       contentsOf: session.lingeringStopProcesses.map {
@@ -429,9 +506,9 @@ actor ProjectProcessManager {
     return errno != ESRCH
   }
 
-  private func exitClassification(for process: Process) -> ProjectExit {
+  private func exitClassification(for process: Process, failureHint: String?) -> ProjectExit {
     guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-      return .error("Process exited with status \(process.terminationStatus).")
+      return .error(failureHint ?? "Process exited with status \(process.terminationStatus).")
     }
     return .normal
   }

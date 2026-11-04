@@ -8,19 +8,23 @@ struct Service: Codable, Equatable, Identifiable, Sendable {
   var relativeDirectory: String
   var launchCommand: String
   var stopCommand: String?
+  /// Port the service listens on, checked before launching. Falls back to the last detected port.
+  var port: Int?
 
   init(
     id: UUID = UUID(),
     name: String,
     relativeDirectory: String = "",
     launchCommand: String,
-    stopCommand: String? = nil
+    stopCommand: String? = nil,
+    port: Int? = nil
   ) {
     self.id = id
     self.name = name
     self.relativeDirectory = relativeDirectory
     self.launchCommand = launchCommand
     self.stopCommand = stopCommand
+    self.port = port
   }
 }
 
@@ -162,6 +166,7 @@ enum ProjectValidationError: LocalizedError, Equatable, Sendable {
   case emptyLaunchCommand(String)
   case duplicateDirectory(String)
   case duplicateIdentifier(UUID)
+  case invalidPort(String)
 
   var errorDescription: String? {
     switch self {
@@ -185,6 +190,10 @@ enum ProjectValidationError: LocalizedError, Equatable, Sendable {
       "Another project already uses this folder: \(path)"
     case let .duplicateIdentifier(id):
       "More than one project or service uses identifier \(id)."
+    case let .invalidPort(service):
+      service == Service.defaultName
+        ? "Port must be a number between 1 and 65535."
+        : "Port of \(service) must be a number between 1 and 65535."
     }
   }
 }

@@ -25,6 +25,7 @@ struct MenuContent: View {
               summary: store.projects.summary(for: project),
               runtimes: store.projects.runtimes,
               launchDisabledReason: launchDisabledReason(for: project),
+              portConflict: store.projects.portConflict.flatMap { $0.projectID == project.id ? $0 : nil },
               send: { store.send(.projects($0)) },
               openLogs: { service in
                 activate()
@@ -63,7 +64,7 @@ struct MenuContent: View {
       .buttonStyle(HoverButtonStyle(padding: 6))
       .padding(6)
     }
-    .frame(width: 340)
+    .frame(width: 420)
   }
 
   private func activate() {
@@ -88,10 +89,22 @@ private struct ProjectRow: View {
   let summary: ProjectStatusSummary
   let runtimes: [UUID: ProjectRuntime]
   let launchDisabledReason: String?
+  let portConflict: ProjectsFeature.PortConflict?
   let send: (ProjectsFeature.Action) -> Void
   let openLogs: (Service) -> Void
 
   @State private var isHovered = false
+  @State private var didCopyPath = false
+
+  private func copyPath() {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(project.directoryPath, forType: .string)
+    didCopyPath = true
+    Task {
+      try? await Task.sleep(for: .seconds(1.5))
+      didCopyPath = false
+    }
+  }
 
   private var singleService: Service? {
     project.hasMultipleServices ? nil : project.services.first
@@ -104,7 +117,10 @@ private struct ProjectRow: View {
   var body: some View {
     VStack(spacing: 2) {
       header
-      if project.hasMultipleServices, isHovered {
+      if let portConflict {
+        PortConflictBanner(conflict: portConflict, send: send)
+      }
+      if project.hasMultipleServices {
         VStack(spacing: 0) {
           ForEach(project.services) { service in
             ServiceRow(
@@ -117,7 +133,6 @@ private struct ProjectRow: View {
           }
         }
         .padding(.leading, 16)
-        .transition(.opacity)
       }
     }
     .padding(.horizontal, 8)
@@ -151,26 +166,34 @@ private struct ProjectRow: View {
         if let service = singleService {
           ServiceActions(service: service, runtime: runtime(service), send: send, openLogs: { openLogs(service) })
         }
-        if summary.isActive {
-          IconButton(systemImage: "folder", help: "Open folder") { send(.openFolder(project.id)) }
-        }
         if project.hasMultipleServices, summary.runningCount > 0 {
           IconButton(systemImage: "arrow.clockwise", help: "Restart all services") { send(.restartTapped(project.id)) }
         }
+        if summary.errorMessage != nil {
+          IconButton(systemImage: "xmark.circle", help: "Clear errors") { send(.clearErrorsTapped(project.id)) }
+        }
+        IconButton(systemImage: "folder", help: "Open folder") { send(.openFolder(project.id)) }
+        IconButton(
+          systemImage: didCopyPath ? "checkmark" : "doc.on.doc",
+          help: "Copy path: \(project.directoryPath)",
+          action: copyPath
+        )
       }
       .opacity(isHovered ? 1 : 0)
       .allowsHitTesting(isHovered)
 
-      PlayStopButton(
-        isActive: summary.isActive,
-        isStopping: summary.status == .stopping,
-        disabledReason: launchDisabledReason,
-        size: 30,
-        stopHelp: project.hasMultipleServices ? "Stop all services" : "Stop",
-        launchHelp: project.hasMultipleServices ? "Launch all services" : "Launch",
-        stop: { send(.stopTapped(project.id)) },
-        launch: { send(.launchTapped(project.id)) }
-      )
+      if !project.hasMultipleServices {
+        PlayStopButton(
+          isActive: summary.isActive,
+          isStopping: summary.status == .stopping,
+          disabledReason: launchDisabledReason,
+          size: 30,
+          stopHelp: "Stop",
+          launchHelp: "Launch",
+          stop: { send(.stopTapped(project.id)) },
+          launch: { send(.launchTapped(project.id)) }
+        )
+      }
     }
   }
 
@@ -178,17 +201,46 @@ private struct ProjectRow: View {
     if let service = singleService {
       return ServiceRow.subtitle(for: runtime(service))
     }
-    let count = project.services.count
     switch summary.status {
     case .starting: return "Starting..."
     case .stopping: return "Stopping..."
-    case .running: return "\(count) services running"
-    case .partial:
-      let progress = "\(summary.runningCount)/\(count) running"
-      return summary.errorMessage.map { "\(progress) · \($0)" } ?? progress
-    case .failed: return summary.errorMessage
-    case .stopped: return "\(count) services"
+    case .running, .partial, .failed, .stopped: return summary.errorMessage
     }
+  }
+}
+
+private struct PortConflictBanner: View {
+  let conflict: ProjectsFeature.PortConflict
+  let send: (ProjectsFeature.Action) -> Void
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Label(conflict.message, systemImage: "exclamationmark.triangle.fill")
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .fixedSize(horizontal: false, vertical: true)
+      HStack(spacing: 6) {
+        if conflict.isFreeing {
+          ProgressView().controlSize(.small)
+          Text("Stopping...").font(.caption).foregroundStyle(.secondary)
+        } else {
+          Button("Stop It and Launch") { send(.portConflictStopAndLaunchTapped) }
+            .buttonStyle(TintedButtonStyle(tint: .orange))
+          Button("Launch Anyway") { send(.portConflictLaunchAnywayTapped) }
+            .buttonStyle(TintedButtonStyle(tint: .secondary))
+          Spacer()
+          Button("Cancel") { send(.portConflictCancelTapped) }
+            .buttonStyle(HoverButtonStyle(padding: 4))
+        }
+      }
+      .font(.caption)
+    }
+    .padding(8)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 6, style: .continuous)
+        .fill(Color.orange.opacity(0.1))
+    )
   }
 }
 
@@ -243,7 +295,11 @@ private struct ServiceRow: View {
     switch runtime.status {
     case .starting: return "Starting..."
     case .stopping: return "Stopping..."
-    case .running: return runtime.detectedURL.map { "\($0.host ?? "localhost")\($0.port.map { ":\($0)" } ?? "")" } ?? "Running"
+    case .running:
+      if let url = runtime.detectedURL {
+        return "\(url.host ?? "localhost")\(url.port.map { ":\($0)" } ?? "")"
+      }
+      return runtime.logsUnavailable ? "Running (logs unavailable)" : "Running"
     case let .exited(.error(message)): return message
     case .exited(.normal): return "Stopped normally"
     case .stopped: return nil

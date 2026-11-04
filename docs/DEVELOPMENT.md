@@ -49,7 +49,7 @@ odd link errors after switching branches, clean the build folder (**⇧⌘K**) o
 | `Stackbar/App` | Entry point (`MenuBarExtra`, Settings and log windows), root `AppFeature`, `AppTerminationCoordinator` (safe quit). |
 | `Stackbar/Domain` | Pure, tested types: `Project`/`Service` and validation, `ProjectDraft` (editing model), `ProjectsDocument` (file format and migration), `CommandDetector`, `URLDetector`, `LogBuffer`, runtime status. |
 | `Stackbar/Features` | TCA reducers: `ProjectsFeature` (launch/stop/delete/save), `PreferencesFeature`, `LogsFeature`. |
-| `Stackbar/Services` | Side-effect clients: `ProjectProcessManager` actor, `LoginShell`, `ProjectRepository`, `LogStore`, AppKit/notification/login-item clients. |
+| `Stackbar/Services` | Side-effect clients: `ProjectProcessManager` actor, `RunningServiceRegistry` (crash recovery), `PortClient` (`lsof` port check), `LoginShell`, `ProjectRepository`, `LogStore`, AppKit/notification/login-item clients. |
 | `Stackbar/Views` | SwiftUI views; shared look (status dot, hover and play/stop buttons, settings cards) in `Views/Components/StackbarStyle.swift`. |
 | `StackbarProcessHost` | Tiny C helper: puts the command in its own process group, then `exec`s the shell, so a stop can terminate every child process. |
 | `StackbarTests`, `StackbarUITests` | Unit and UI tests. |
@@ -62,6 +62,10 @@ Key rules (details in [architecture-technique-stackbar.md](architecture-techniqu
 - Commands run as `<shell> -ilc "<command>"` (zsh) or `--login -i -c` (bash) in the service folder.
 - The app never reports a service as stopped until termination is confirmed, and never sends
   `SIGKILL` automatically.
+- Running process groups are persisted in `running.json`; on launch, live groups whose leader start
+  time still matches are adopted (no `Process` object, polled with `kill(-pgid, 0)`).
+- A foreign process is only signaled (SIGTERM) after the user clicks **Stop It and Launch** on a port
+  conflict.
 - The projects file is versioned (`ProjectsDocument`); older versions are migrated on load and
   rewritten on the next save. Unknown future versions are preserved, not overwritten.
 
@@ -103,7 +107,8 @@ login items and notifications cannot be fully covered by automated tests.
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-Review the draft, then publish it. Builds are not notarized (no Developer ID).
+Review the draft, then publish it. Builds are not notarized: that needs a Developer ID certificate
+from the paid Apple Developer Program. The README explains how users open the app anyway.
 
 ## Contributing
 

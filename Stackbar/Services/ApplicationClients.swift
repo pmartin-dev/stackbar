@@ -19,6 +19,8 @@ struct ProjectProcessClient: Sendable {
   var activeServiceIDs: @Sendable () async -> Set<UUID>
   var stopAll: @Sendable () async -> [ProcessStopFailure]
   var removeLogs: @Sendable (UUID) async -> Void
+  /// Adopts services left running by a previous run; returns their process group.
+  var adoptOrphans: @Sendable ([ServiceLaunch]) async -> [UUID: Int32] = { _ in [:] }
 }
 
 struct LogClient: Sendable {
@@ -38,7 +40,8 @@ struct LoginItemClient: Sendable {
 struct NotificationClient: Sendable {
   var authorizationStatus: @MainActor @Sendable () async -> NotificationAuthorization
   var requestAuthorization: @MainActor @Sendable () async throws -> NotificationAuthorization
-  var send: @MainActor @Sendable (String, String) async throws -> Void
+  /// Sends a notification (title, body); clicking it opens the given log window when provided.
+  var send: @MainActor @Sendable (String, String, LogWindowDestination?) async throws -> Void
 }
 
 struct WorkspaceClient: Sendable {
@@ -64,7 +67,10 @@ private actor PreferencesRepository {
 private enum LiveServices {
   static let projectRepository = ProjectRepository()
   static let logStore = LogStore()
-  static let processManager = ProjectProcessManager(logStore: logStore)
+  static let processManager = ProjectProcessManager(
+    logStore: logStore,
+    registry: RunningServiceRegistry(fileURL: RunningServiceRegistry.defaultURL)
+  )
   static let preferencesRepository = PreferencesRepository()
 }
 
@@ -84,7 +90,8 @@ private enum ProjectProcessClientKey: DependencyKey {
     runCommand: { try await LiveServices.processManager.runCommand($0, in: $1) },
     activeServiceIDs: { await LiveServices.processManager.activeServiceIDs() },
     stopAll: { await LiveServices.processManager.stopAll() },
-    removeLogs: { await LiveServices.processManager.removeLogs(for: $0) }
+    removeLogs: { await LiveServices.processManager.removeLogs(for: $0) },
+    adoptOrphans: { await LiveServices.processManager.adoptOrphans($0) }
   )
 }
 
@@ -125,11 +132,14 @@ private enum NotificationClientKey: DependencyKey {
       _ = try await center.requestAuthorization(options: [.alert, .sound])
       return await currentNotificationAuthorization()
     },
-    send: { title, body in
+    send: { title, body, logWindow in
       let content = UNMutableNotificationContent()
       content.title = title
       content.body = body
       content.sound = .default
+      if let logWindow {
+        content.userInfo = logWindow.notificationUserInfo
+      }
       let request = UNNotificationRequest(
         identifier: UUID().uuidString,
         content: content,

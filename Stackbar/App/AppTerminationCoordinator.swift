@@ -1,5 +1,6 @@
 import AppKit
 import ComposableArchitecture
+import UserNotifications
 
 @MainActor
 final class AppTerminationCoordinator: NSObject, NSApplicationDelegate {
@@ -7,6 +8,10 @@ final class AppTerminationCoordinator: NSObject, NSApplicationDelegate {
   @Dependency(\.projectRepositoryClient) private var repositoryClient
 
   private var isHandlingTermination = false
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    UNUserNotificationCenter.current().delegate = self
+  }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     guard !isHandlingTermination else { return .terminateCancel }
@@ -85,5 +90,25 @@ final class AppTerminationCoordinator: NSObject, NSApplicationDelegate {
       return serviceID.uuidString
     }
     return project.hasMultipleServices ? "\(project.name) › \(service.name)" : project.name
+  }
+}
+
+extension AppTerminationCoordinator: UNUserNotificationCenterDelegate {
+  nonisolated func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse
+  ) async {
+    guard
+      response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+      let destination = LogWindowDestination(
+        notificationUserInfo: response.notification.request.content.userInfo
+      )
+    else {
+      return
+    }
+    await MainActor.run {
+      NSApp.activate()
+      NotificationCenter.default.post(name: LogWindowDestination.openRequest, object: destination)
+    }
   }
 }
