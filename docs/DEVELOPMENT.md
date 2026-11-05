@@ -11,7 +11,7 @@
 
 ## Quick start
 
-Requirements: Xcode 27.2 and XcodeGen (`brew install xcodegen`).
+Requirements: Xcode 26.6 and XcodeGen (`brew install xcodegen`).
 
 ```sh
 xcodegen generate
@@ -97,7 +97,7 @@ login items and notifications cannot be fully covered by automated tests.
 
 ## CI and releases
 
-- **CI** (`.github/workflows/ci.yml`): on pull requests and pushes to `main`, checks Xcode 27.2,
+- **CI** (`.github/workflows/ci.yml`): on pull requests and pushes to `main`, checks Xcode 26.6,
   generates the project and runs all tests on `macos-26`.
 - **Release** (`.github/workflows/release.yml`): pushing a `v*` tag runs the tests, archives a
   universal (arm64 + x86_64) app signed ad hoc, verifies the signature and architectures, builds the
