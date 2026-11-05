@@ -44,11 +44,13 @@ struct LoginShell: Equatable, Sendable {
   }
 
   func arguments(for command: String) -> [String] {
+    // Keep background jobs in the process group Stackbar signals when stopping a service.
+    let commandWithJobControlDisabled = "set +m; \(command)"
     switch family {
     case .zsh:
-      ["-ilc", command]
+      ["-ilc", commandWithJobControlDisabled]
     case .bash:
-      ["--login", "-i", "-c", command]
+      ["--login", "-i", "-c", commandWithJobControlDisabled]
     }
   }
 
@@ -66,4 +68,3 @@ struct LoginShell: Equatable, Sendable {
     return shell
   }
 }
-
