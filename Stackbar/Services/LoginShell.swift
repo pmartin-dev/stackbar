@@ -48,9 +48,9 @@ struct LoginShell: Equatable, Sendable {
     let commandWithJobControlDisabled = "set +m; \(command)"
     switch family {
     case .zsh:
-      ["-ilc", commandWithJobControlDisabled]
+      return ["-ilc", commandWithJobControlDisabled]
     case .bash:
-      ["--login", "-i", "-c", commandWithJobControlDisabled]
+      return ["--login", "-i", "-c", commandWithJobControlDisabled]
     }
   }
 
